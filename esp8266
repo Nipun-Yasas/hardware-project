@@ -1,0 +1,133 @@
+#define BLYNK_TEMPLATE_ID "TMPL65krQEEhL"           // Blynk template ID
+#define BLYNK_TEMPLATE_NAME "Ventilator"            // Blynk template name
+#define BLYNK_AUTH_TOKEN "Th6xrddXIY59N-_hN5Nd7WIVOmRTxgRW" // Blynk authorization token
+
+#define DPIN 14        // Pin to connect DHT sensor (GPIO number) D5
+#define DTYPE DHT11    // DHT sensor type
+
+#include <Wire.h>                // Include Wire library for I2C communication
+#include "MAX30105.h"            // Include MAX30105 sensor library
+#include "spo2_algorithm.h"      // Include SpO2 algorithm library
+#include "DHT.h"                 // Include DHT sensor library
+#include <Blynk.h>               // Include Blynk library
+#include <ESP8266WiFi.h>         // Include ESP8266 WiFi library
+#include <BlynkSimpleEsp8266.h>  // Include Blynk ESP8266 library
+
+MAX30105 particleSensor;         // Create an instance of MAX30105 sensor
+DHT dht(DPIN, DTYPE);            // Create an instance of DHT sensor
+
+char auth[] = BLYNK_AUTH_TOKEN;  // Blynk authorization token
+char ssid[] = "HUAWEI nova 7i";  // WiFi SSID
+char pass[] = "123456789";       // WiFi password
+
+#define SAMPLE_SIZE 100          // Number of samples for SpO2 and heart rate calculation
+
+uint32_t irBuffer[SAMPLE_SIZE];  // Buffer for infrared LED sensor data
+uint32_t redBuffer[SAMPLE_SIZE]; // Buffer for red LED sensor data
+
+int32_t spo2;                    // SPO2 value
+int32_t heartRate;               // Heart rate value
+int8_t validSPO2;                // Valid SPO2 indicator
+int8_t validHeartRate;           // Valid heart rate indicator
+
+const int sensorPin = A0;        // Analog input pin connected to MPX10DP Vout
+
+void setup() {
+  Serial.begin(115200);          // Start serial communication at 115200 baud rate
+  dht.begin();                   // Initialize DHT sensor
+
+  WiFi.begin(ssid, pass);        // Connect to WiFi network
+  Serial.print("Connecting...");
+
+  // Wait until connected to WiFi
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print("Waiting to connect WiFi\n");
+  }
+  Serial.print("WiFi is connected \n");
+  Serial.print(WiFi.localIP());  // Print local IP address
+
+  Blynk.begin(auth, ssid, pass); // Connect to Blynk server
+
+  Serial.println("Initializing...");
+
+  // Initialize MAX30105 sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_STANDARD)) {
+    Serial.println("MAX30105 was not found. Please check wiring/power.");
+    while (1);                   // Stop execution if sensor is not found
+  }
+  Serial.println("connected");
+
+  // Setup MAX30105 sensor with desired settings
+  byte ledBrightness = 60;       // LED brightness (0=Off to 255=50mA)
+  byte sampleAverage = 4;        // Number of samples to average (1, 2, 4, 8, 16, 32)
+  byte ledMode = 2;              // LED mode (1=Red only, 2=Red + IR, 3=Red + IR + Green)
+  int sampleRate = 100;          // Sample rate (50, 100, 200, 400, 800, 1000, 1600, 3200)
+  int pulseWidth = 411;          // Pulse width (69, 118, 215, 411)
+  int adcRange = 4096;           // ADC range (2048, 4096, 8192, 16384)
+
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange); // Apply settings
+}
+
+void loop() {
+  Blynk.run();                   // Run Blynk to keep the connection alive
+
+  // Collect samples for heart rate and SpO2 calculation
+  for (int i = 0; i < SAMPLE_SIZE; i++) {
+    while (particleSensor.available() == false) { // Wait for new data
+      particleSensor.check();      // Check the sensor for new data
+      yield();                     // Allow background tasks to run to avoid watchdog reset
+    }
+
+    // Read the latest samples
+    redBuffer[i] = particleSensor.getRed();
+    irBuffer[i] = particleSensor.getIR();
+    particleSensor.nextSample();   // Move to the next sample
+  }
+
+  // Calculate heart rate and SpO2 after collecting samples
+  maxim_heart_rate_and_oxygen_saturation(irBuffer, SAMPLE_SIZE, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+  printResults();                  // Print the results
+
+  delay(1000);                     // Delay for a second before collecting new samples
+}
+
+void printResults() {
+  Serial.print(F("HR="));
+  if (validHeartRate) {
+    Serial.print(heartRate, DEC);       // Print valid heart rate
+    Blynk.virtualWrite(V0, heartRate);  // Send heart rate to Blynk virtual pin V0
+  } else {
+    Serial.print(F("Invalid"));         // Print "Invalid" if heart rate is not valid
+  }
+
+  Serial.print(F(", SPO2="));
+  if (validSPO2) {
+    Serial.print(spo2, DEC);            // Print valid SpO2
+    Blynk.virtualWrite(V1, spo2);       // Send SpO2 to Blynk virtual pin V1
+  } else {
+    Serial.print(F("Invalid"));         // Print "Invalid" if SpO2 is not valid
+  }
+  Serial.println();
+
+  // Read pressure from MPX10DP sensor
+  int sensorValue = analogRead(sensorPin); // Read the analog value from the sensor
+  float voltage = sensorValue * (1.0 / 1023.0); // Convert the analog value to voltage
+  float pressure_Pa = (voltage * 100000) / 1.0;  // Convert voltage to pressure in kPa
+
+  Serial.print("Pressure: ");
+  Serial.print(pressure_Pa);
+  Serial.println(" Pa");
+  Blynk.virtualWrite(V3, pressure_Pa);  // Send pressure value to Blynk virtual pin V3
+
+  // Read and print temperature from DHT sensor
+  Serial.print("Temp: ");
+  Serial.print(dht.readTemperature(false)); // Print temperature
+  Serial.print(" F, Hum: ");
+  Blynk.virtualWrite(V2, dht.readTemperature(false)); // Send temperature to Blynk virtual pin V2
+
+  // Read and print humidity from DHT sensor
+  Serial.print(dht.readHumidity(false));    // Print humidity
+  Serial.println("%");
+  Blynk.virtualWrite(V3, dht.readHumidity(false)); // Send humidity to Blynk virtual pin V3
+}
